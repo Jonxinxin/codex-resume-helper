@@ -1,0 +1,12 @@
+__pycache__/
+build/
+dist/
+release/
+.venv/
+*.py[cod]
+*.log
+.env
+.env.*
+connection.json
+settings.json
+retry-state.json
