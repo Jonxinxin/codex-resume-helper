@@ -71,6 +71,7 @@ class Monitor:
         self.next_poll = 0
         self.last_note = ""
         self.last_observation = None
+        self.countdown_key = None
         self.journal_error = ""
         try:
             self.journal = read_json(JOURNAL)
@@ -183,6 +184,8 @@ class Monitor:
             title, tone = "额度或账号异常", "error"
         elif ev.signal == "rate_limit":
             title, tone = ("限流，正在重连" if ev.kind == "busy" else "限流冷却中"), "warning"
+        elif ev.signal == "overloaded":
+            title, tone = ("上游繁忙，等待续接" if action == "countdown" else "上游繁忙，正在续接"), "warning"
         elif ev.signal == "reconnecting":
             title, tone = "Codex 正在重连", "warning"
         elif action in ("countdown", "send"):
@@ -203,7 +206,10 @@ class Monitor:
         if action == "hold":
             self.pause(note, alert=True)
         elif action == "countdown":
-            self.note("发现可续接的临时故障，等待冷却后复核")
+            mark = (self.policy.attempts, self.policy.candidate)
+            if self.countdown_key != mark:
+                self.countdown_key = mark
+                self.note(f"发现可续接的临时故障，倒计时 {max(1, int(self.policy.grace))} 秒后复核并续接")
         elif action == "send":
             # Re-read identity, process and input immediately before the one mutation.
             fresh = self.runtime.verify(self.binding, processes=True)

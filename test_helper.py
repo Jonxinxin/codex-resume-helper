@@ -89,6 +89,12 @@ class ScreenTests(unittest.TestCase):
         for screen in (RATE_FAULT.replace("Ask Codex to do anything", "未发送的草稿"), "■ " + RATE_MESSAGE):
             self.assertEqual(inspect_screen(screen, "failed").kind, "manual")
 
+    def test_high_demand_error_is_retryable(self):
+        screen = ("■ We're currently experiencing high demand, which may cause temporary errors."
+                  "\n\n› Ask Codex to do anything\n  ? for shortcuts")
+        ev = inspect_screen(screen, "failed")
+        self.assertEqual((ev.kind, ev.signal), ("retry", "overloaded"))
+
     def test_reconnecting_network_and_account_errors_are_distinct(self):
         self.assertEqual(inspect_screen(RECONNECTING.replace(RATE_MESSAGE, "network error"), "running").signal, "reconnecting")
         self.assertEqual(inspect_screen(RECONNECTING.replace(RATE_MESSAGE, "429 insufficient_quota"), "running").signal, "account")
@@ -114,12 +120,14 @@ class PolicyTests(unittest.TestCase):
         self.p.dispatching(2)
         self.assertEqual(self.p.observe(self.ev, 4, 9999)[0], "hold")
 
-    def test_ack_does_not_resend_same_fault(self):
+    def test_ack_persistent_fault_needs_fresh_cooldown(self):
         self.p.observe(self.ev, 2, 0)
         self.p.dispatching(2)
         self.p.acknowledged()
-        for stamp in (60, 300, 9999):
-            self.assertEqual(self.p.observe(self.ev, 2, stamp)[0], "watch")
+        # The same fault on screen must never resend without a new cooldown.
+        self.assertEqual(self.p.observe(self.ev, 2, 1)[0], "countdown")
+        self.assertEqual(self.p.observe(self.ev, 2, 60)[0], "countdown")
+        self.assertEqual(self.p.observe(self.ev, 2, 61)[0], "send")
 
     def test_no_reset_from_old_idle(self):
         self.p.dispatching(5)
@@ -142,16 +150,16 @@ class PolicyTests(unittest.TestCase):
         self.p.observe(self.ev, 3, 29)
         self.assertEqual(self.p.due, 59)
 
-    def test_temporary_rate_limit_uses_at_least_one_minute(self):
+    def test_rate_limit_uses_configured_first_wait(self):
         ev = inspect_screen(RATE_FAULT, "failed")
         self.assertEqual(self.p.observe(ev, 2, 0)[0], "countdown")
-        self.assertEqual(self.p.due, 60)
-        self.assertEqual(self.p.observe(ev, 2, 59)[0], "countdown")
-        self.assertEqual(self.p.observe(ev, 2, 60)[0], "send")
+        self.assertEqual(self.p.due, 30)
+        self.assertEqual(self.p.observe(ev, 2, 29)[0], "countdown")
+        self.assertEqual(self.p.observe(ev, 2, 30)[0], "send")
         self.p.dispatching(2)
         self.p.acknowledged()
         self.p.observe(ev, 3, 70)
-        self.assertEqual(self.p.due, 190)
+        self.assertEqual(self.p.due, 130)
 
     def test_server_wait_hint_can_exceed_normal_backoff_cap(self):
         for hint, seconds in (("Retry-After: 900", 900), ("Please retry after 12 minutes", 720), ("Try again in 80 seconds", 80)):
@@ -210,6 +218,7 @@ class MonitorIntegrationTests(unittest.TestCase):
         m.policy = RetryPolicy(delay=30)
         m.journal = {}
         m.last_note = ""
+        m.countdown_key = None
         m.message = "继续"
         m.runtime = self.FakeRuntime()
         return m
@@ -318,11 +327,30 @@ class MonitorIntegrationTests(unittest.TestCase):
             m.runtime.seq += 1
             m.poll()
             self.assertEqual(m.runtime.sends, [])
-            self.assertGreater(m.policy.due - time.monotonic(), 58)
+            self.assertGreater(m.policy.due - time.monotonic(), 28)
             m.policy.due = 0
             m.poll()
             m.poll()
             self.assertEqual(m.runtime.sends, ["继续"])
+
+    def test_persistent_fault_retries_after_a_fresh_countdown(self):
+        import app
+        with tempfile.TemporaryDirectory() as tmp, patch.object(app, "JOURNAL", Path(tmp) / "journal.json"):
+            m = self.make_monitor(tmp)
+            m.poll()
+            m.policy.due = 0
+            m.poll()
+            self.assertEqual(m.runtime.sends, ["继续"])
+            # Same screen and same state_change_seq: no stall, a new countdown starts.
+            m.poll()
+            self.assertEqual(m.runtime.sends, ["继续"])
+            events = list(m.events.queue)
+            self.assertTrue(any(k == "status" and "秒后续接" in v for k, v in events))
+            self.assertTrue(any(k == "log" and "倒计时" in v for k, v in events))
+            m.policy.due = 0
+            m.poll()
+            self.assertEqual(m.runtime.sends, ["继续", "继续"])
+            self.assertEqual(m.policy.attempts, 2)
 
     def test_quota_error_ends_monitoring_with_visible_manual_status(self):
         import app

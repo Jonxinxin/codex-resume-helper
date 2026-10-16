@@ -10,12 +10,15 @@ TRANSIENT = re.compile(
     r"stream.*(?:disconnect|interrupt|error|fail)|error.*stream|network|connection.*(?:reset|closed|lost|abort|error)|"
     r"timed?\s*out|timeout|error sending request|transport error|server error|internal error|"
     r"service unavailable|bad gateway|gateway timeout|unexpected status.*(?:500|502|503|504)|"
-    r"exceeded retry|retry limit|retries exhausted|temporarily unavailable|网络|连接.*(?:断|失败)|超时|服务.*暂时", re.I)
+    r"exceeded retry|retry limit|retries exhausted|temporarily unavailable|"
+    r"high demand|overloaded|over capacity|temporarily busy|thank you for your patience|"
+    r"网络|连接.*(?:断|失败)|超时|服务.*暂时|上游.*繁忙", re.I)
 MANUAL = re.compile(
     r"usage limit|quota|insufficient|\b401\b|\b403\b|unauthori|forbidden|log.?in|sign.?in|"
     r"authentication|billing|context.*(?:full|limit|exceed)|maximum context|额度|限额|登录|余额|上下文.*(?:满|限制)", re.I)
 BUSY = re.compile(r"esc to interrupt|press esc to interrupt|ctrl\+c to interrupt|reconnecting|retrying|正在重连|正在重试|按.*中断", re.I)
 RATE_LIMIT = re.compile(r"rate[\s_-]+limit|\b429\b|too many requests|请求频率|速率限制|限流", re.I)
+OVERLOADED = re.compile(r"high demand|overloaded|over capacity|temporarily busy|上游.*繁忙", re.I)
 RECONNECT = re.compile(
     r"^\s*(?:[•●\u2800-\u28ff]\s*)?(?:Reconnecting|Retrying)[.\s…]*"
     r"(?P<attempt>\d+\s*/\s*\d+)\b.*(?:esc to interrupt|ctrl\+c to interrupt)", re.I)
@@ -116,7 +119,8 @@ def inspect_screen(text: str, state: str, exited: bool = False) -> Evidence:
                         fingerprint, "rate_limit", retry_after_seconds(body))
     if not TRANSIENT.search(body):
         return Evidence("manual", "未识别的故障，保留给你处理：" + body[:200])
-    return Evidence("retry", body[:240], fingerprint)
+    signal = "overloaded" if OVERLOADED.search(body) else ""
+    return Evidence("retry", body[:240], fingerprint, signal, retry_after_seconds(body))
 
 
 @dataclass
@@ -126,11 +130,17 @@ class RetryPolicy:
     attempts: int = 0
     candidate: tuple | None = None
     due: float = 0
+    grace: float = 0
     sent_key: tuple | None = None
     uncertain: bool = False
     awaiting: bool = False
     confirmed_active: bool = False
     dispatch_seq: int = -1
+
+    def _recovered(self):
+        self.attempts = 0
+        self.sent_key = None
+        self.candidate = None
 
     def observe(self, ev: Evidence, seq: int, now: float) -> tuple[str, str]:
         if self.uncertain:
@@ -140,16 +150,21 @@ class RetryPolicy:
                 self.confirmed_active = True
             if seq > self.dispatch_seq and ev.kind == "normal":
                 self.awaiting = False
-                self.attempts = 0
-                self.sent_key = None
-                self.candidate = None
+                self._recovered()
                 return "watch", "已恢复并完成本轮，继续监测"
-            if ev.kind == "retry" and (seq > self.dispatch_seq or self.confirmed_active):
-                self.awaiting = False
-            elif ev.kind == "manual":
+            if ev.kind == "manual":
                 return "hold", ev.reason
+            if ev.kind == "retry":
+                # The fault is still there after our send. Whether Codex consumed
+                # the message or the same error simply came back, the only safe
+                # progress is a fresh, visible cooldown instead of stalling.
+                self.awaiting = False
+                self.sent_key = None
             else:
                 return "watch", ev.reason if ev.signal else "已发送，等待 Codex 新的状态变化；不重复发送"
+        elif ev.kind == "normal" and self.attempts > 0 and seq > self.dispatch_seq:
+            self._recovered()
+            return "watch", "已恢复并完成本轮，继续监测"
         if ev.kind != "retry":
             self.candidate = None
             return ("hold" if ev.kind == "manual" else "watch"), ev.reason
@@ -160,8 +175,8 @@ class RetryPolicy:
             return "hold", f"已达到连续重试上限 {self.limit} 次"
         if key != self.candidate:
             self.candidate = key
-            base = max(self.delay, 60) if ev.signal == "rate_limit" else self.delay
-            self.due = now + max(ev.retry_after, min(300, base * (2 ** self.attempts)))
+            self.grace = max(ev.retry_after, min(300, self.delay * (2 ** self.attempts)))
+            self.due = now + self.grace
         if now < self.due:
             label = "临时限流冷却中" if ev.signal == "rate_limit" else "故障已确认"
             return "countdown", f"{label}，{max(1, int(self.due-now))} 秒后续接"
@@ -171,6 +186,7 @@ class RetryPolicy:
         # Persist this BEFORE crossing the process boundary. A crash/timeout is ambiguous.
         self.attempts += 1
         self.sent_key = self.candidate
+        self.candidate = None  # the next fault, even an identical one, needs a fresh cooldown
         self.dispatch_seq = seq
         self.uncertain = True
         self.awaiting = True

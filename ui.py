@@ -173,7 +173,7 @@ class ResumeView(ctk.CTk):
                                  border_width=0, fg_color="#F5F7F6", text_color=TEXT, font=self.font(13))
             entry.pack(side="left")
             self.settings_widgets.append(entry)
-        self.label(settings, "普通故障最长等 5 分钟。\n限流至少等 60 秒或指定时长。", size=11,
+        self.label(settings, "故障按“首次等待”递增退避，最长等 5 分钟。\n报错给出等待时间时以它为准。", size=11,
                    color=MUTED, justify="left", height=38).grid(
             row=6, column=0, sticky="w", padx=20, pady=(12, 12))
 
