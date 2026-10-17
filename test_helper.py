@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import notify
 from core import inspect_screen, RetryPolicy, Evidence
 from runtime import Pebrel, Binding, RuntimeErrorInfo
 
@@ -146,15 +147,16 @@ class PolicyTests(unittest.TestCase):
         self.p.observe(Evidence("normal", "idle"), 5, 100)
         self.assertEqual(self.p.attempts, 1)
 
-    def test_new_success_resets_budget(self):
+    def test_new_success_reports_resumed_and_resets_budget(self):
         self.p.dispatching(5)
         self.p.acknowledged()
-        self.p.observe(Evidence("normal", "finished"), 7, 100)
+        self.assertEqual(self.p.observe(Evidence("normal", "finished"), 7, 100)[0], "resumed")
+        self.assertEqual(self.p.completed, 1)
         self.assertEqual(self.p.attempts, 0)
 
     def test_limit(self):
         self.p.attempts = 6
-        self.assertEqual(self.p.observe(self.ev, 20, 100)[0], "hold")
+        self.assertEqual(self.p.observe(self.ev, 20, 100)[0], "exhausted")
 
     def test_grace_restarts_on_state_change(self):
         self.p.observe(self.ev, 2, 0)
@@ -186,6 +188,58 @@ class PolicyTests(unittest.TestCase):
         action, note = self.p.observe(inspect_screen(RECONNECTING, "running"), 3, 100)
         self.assertEqual(action, "watch")
         self.assertIn("限流", note)
+
+
+class NotifyTests(unittest.TestCase):
+    def test_empty_webhook_disables_notifications(self):
+        self.assertEqual(notify.validate_webhook(""), "")
+        self.assertEqual(notify.validate_webhook("   "), "")
+
+    def test_only_feishu_https_webhooks_are_accepted(self):
+        good = "https://open.feishu.cn/open-apis/bot/v2/hook/token"
+        self.assertEqual(notify.validate_webhook(good), good)
+        for bad in ("http://open.feishu.cn/open-apis/bot/v2/hook/token", "https://example.com/hook",
+                    "not-a-url", "open.feishu.cn/hook"):
+            with self.subTest(url=bad), self.assertRaises(ValueError):
+                notify.validate_webhook(bad)
+
+    def test_send_posts_a_text_payload(self):
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b'{"code":0,"msg":"success"}'
+
+        def fake_urlopen(request, timeout=None):
+            captured["url"] = request.full_url
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return Response()
+
+        with patch("notify.urllib.request.urlopen", fake_urlopen):
+            notify.send("https://open.feishu.cn/hook/x", "hello")
+        self.assertEqual(captured["url"], "https://open.feishu.cn/hook/x")
+        self.assertEqual(captured["body"], {"msg_type": "text", "content": {"text": "hello"}})
+
+    def test_send_raises_on_error_code(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b'{"code":19021,"msg":"invalid webhook"}'
+
+        with patch("notify.urllib.request.urlopen", lambda *a, **k: Response()):
+            with self.assertRaises(RuntimeError):
+                notify.send("https://open.feishu.cn/hook/x", "hello")
 
 
 class IdentityTests(unittest.TestCase):
@@ -231,6 +285,7 @@ class MonitorIntegrationTests(unittest.TestCase):
         m.last_note = ""
         m.countdown_key = None
         m.message = "继续"
+        m.webhook = ""
         m.runtime = self.FakeRuntime()
         return m
 
@@ -362,6 +417,38 @@ class MonitorIntegrationTests(unittest.TestCase):
             m.poll()
             self.assertEqual(m.runtime.sends, ["继续", "继续"])
             self.assertEqual(m.policy.attempts, 2)
+
+    def test_successful_resume_notifies_feishu_once(self):
+        import app
+        with tempfile.TemporaryDirectory() as tmp, patch.object(app, "JOURNAL", Path(tmp) / "journal.json"):
+            m = self.make_monitor(tmp)
+            m.webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/token"
+            with patch.object(m, "notify") as notifier:
+                m.poll()
+                m.policy.due = 0
+                m.poll()
+                m.runtime.seq = 4
+                m.runtime.state = "finished"
+                m.runtime.screen = "• 修复完成\n› Ask Codex to do anything"
+                m.poll()
+            notifier.assert_called_once()
+            self.assertIn("续接成功", notifier.call_args[0][0])
+            self.assertIn("test-session", notifier.call_args[0][0])
+
+    def test_no_notification_without_a_webhook(self):
+        import app
+        with tempfile.TemporaryDirectory() as tmp, patch.object(app, "JOURNAL", Path(tmp) / "journal.json"):
+            m = self.make_monitor(tmp)
+            with patch.object(m, "notify") as notifier, patch("app.notify.send") as sender:
+                m.poll()
+                m.policy.due = 0
+                m.poll()
+                m.runtime.seq = 4
+                m.runtime.state = "finished"
+                m.runtime.screen = "• 修复完成\n› Ask Codex to do anything"
+                m.poll()
+            notifier.assert_called_once()  # the monitor decides, not the policy
+            sender.assert_not_called()
 
     def test_quota_error_ends_monitoring_with_visible_manual_status(self):
         import app

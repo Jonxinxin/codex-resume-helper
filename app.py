@@ -11,11 +11,12 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import customtkinter as ctk
-from ui import ResumeView
+from ui import ResumeView, GREEN, MUTED, WHITE, LINE, TEXT
 from dataclasses import asdict
 import logging
 from logging.handlers import RotatingFileHandler
 
+import notify
 from core import RetryPolicy, inspect_screen
 from runtime import Pebrel, Binding, RuntimeErrorInfo
 
@@ -68,6 +69,7 @@ class Monitor:
         self.policy = RetryPolicy()
         self.interval = 10
         self.message = "继续"
+        self.webhook = ""
         self.next_poll = 0
         self.last_note = ""
         self.last_observation = None
@@ -92,6 +94,27 @@ class Monitor:
     def status(self, text):
         self.emit("status", text)
         self.emit("attempts", self.policy.attempts)
+
+    def summary(self, headline):
+        binding = self.binding
+        return (f"{headline}\n"
+                f"任务：{binding.title or 'Codex'}\n"
+                f"目录：{binding.cwd}\n"
+                f"会话：{binding.session_id}\n"
+                f"时间：{time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    def notify(self, text):
+        if not self.webhook:
+            return
+        threading.Thread(target=self._notify, args=(self.webhook, text), daemon=True).start()
+
+    def _notify(self, webhook, text):
+        try:
+            notify.send(webhook, text)
+            self.note("飞书通知已发送")
+        except Exception as e:
+            logger.warning("飞书通知发送失败：%s", e)
+            self.note(f"飞书通知发送失败：{e}")
 
     def persist(self):
         if self.binding:
@@ -145,7 +168,7 @@ class Monitor:
             if self.journal_error:
                 raise RuntimeErrorInfo(self.journal_error)
             self.runtime.verify(self.binding, processes=True)
-            self.interval, self.policy.wait_min, self.policy.wait_max, self.policy.limit, self.message = data
+            self.interval, self.policy.wait_min, self.policy.wait_max, self.policy.limit, self.message, self.webhook = data
             if self.policy.uncertain:
                 raise RuntimeErrorInfo("上次发送结果未确认，请先在原窗格检查，再点击重置重试")
             self.stop_requested.clear()
@@ -153,7 +176,11 @@ class Monitor:
             self.next_poll = 0
             self.emit("enabled", True)
             self.emit("health", {"title": "", "tone": "normal"})
-            self.note(f"开始监测，每 {self.interval} 秒检查；等待 {self.policy.wait_min}–{self.policy.wait_max} 秒后重试，最多连续 {self.policy.limit} 次")
+            note = f"开始监测，每 {self.interval} 秒检查；等待 {self.policy.wait_min}–{self.policy.wait_max} 秒后重试，最多连续 {self.policy.limit} 次"
+            self.note(note + ("；飞书通知已开启" if self.webhook else ""))
+        elif name == "webhook":
+            self.webhook = data or ""
+            self.note("飞书通知已开启，续接成功或连续重试达到上限时推送" if self.webhook else "飞书通知已关闭")
         elif name == "pause":
             self.pause("监测已暂停")
         elif name == "preview":
@@ -178,7 +205,7 @@ class Monitor:
         seq = row.get("state_change_seq", 0)
         action, note = self.policy.observe(ev, seq, time.monotonic())
         self.emit("checked", time.time())
-        if action == "hold":
+        if action in ("hold", "exhausted"):
             title, tone = "需要处理", "error"
         elif ev.signal == "account":
             title, tone = "额度或账号异常", "error"
@@ -203,7 +230,13 @@ class Monitor:
             self.last_observation = observation
         self.status(note)
         self.persist()
-        if action == "hold":
+        if action == "resumed":
+            self.note(note)
+            self.notify(self.summary(f"✅ Codex 续接成功（第 {self.policy.completed} 次生效）"))
+        elif action == "exhausted":
+            self.pause(note, alert=True)
+            self.notify(self.summary(f"⚠️ Codex 连续续接 {self.policy.limit} 次仍未成功，已停止自动续接"))
+        elif action == "hold":
             self.pause(note, alert=True)
         elif action == "countdown":
             mark = (self.policy.attempts, self.policy.candidate)
@@ -294,7 +327,11 @@ class App(ResumeView):
         self.wait_min_var = tk.StringVar(value=str(self.config_data.get("wait_min", 5)))
         self.wait_max_var = tk.StringVar(value=str(self.config_data.get("wait_max", 30)))
         self.limit_var = tk.StringVar(value=str(self.config_data.get("limit", 6)))
+        self.webhook_var = tk.StringVar(value=self.config_data.get("webhook", ""))
+        self.notify_window = None
+        self.notify_status = None
         self.build_ui()
+        self.refresh_notify_hint()
         self.search.trace_add("write", lambda *_: self.render_rows())
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.after(100, self.drain)
@@ -326,6 +363,69 @@ class App(ResumeView):
         if self.bound:
             self.monitor.commands.put(("preview", None))
 
+    def refresh_notify_hint(self):
+        if self.config_data.get("webhook"):
+            self.notify_button.configure(text="飞书通知 ●", text_color=GREEN)
+        else:
+            self.notify_button.configure(text="飞书通知", text_color=MUTED)
+
+    def notify_settings(self):
+        if self.notify_window is not None and self.notify_window.winfo_exists():
+            self.notify_window.lift()
+            return
+        dialog = ctk.CTkToplevel(self, fg_color=WHITE)
+        self.notify_window = dialog
+        dialog.title("飞书通知")
+        dialog.geometry(f"560x318+{max(0, self.winfo_rootx() + 110)}+{max(0, self.winfo_rooty() + 150)}")
+        dialog.minsize(480, 300)
+        dialog.transient(self)
+        self.label(dialog, "飞书通知", size=17, bold=True).pack(anchor="w", padx=24, pady=(18, 6))
+        self.label(dialog, "粘贴飞书群自定义机器人的 Webhook 地址。续接成功、或连续重试达到上限时各推送一条文本消息。\n留空即关闭通知；只会发送本助手的状态摘要，终端内容不会上传。",
+                   size=12, color=MUTED, justify="left", height=48, wraplength=500).pack(anchor="w", padx=24)
+        entry = ctk.CTkEntry(dialog, textvariable=self.webhook_var, height=36, fg_color="#FAFBFA",
+                             border_color=LINE, corner_radius=8, font=self.font(12), text_color=TEXT)
+        entry.pack(fill="x", padx=24, pady=(4, 8))
+        self.notify_status = self.label(dialog, "", size=12, color=MUTED, height=22)
+        self.notify_status.pack(anchor="w", padx=24)
+        row = ctk.CTkFrame(dialog, fg_color="transparent")
+        row.pack(fill="x", padx=24, pady=(6, 16))
+        self.button(row, "测试发送", self.test_notify, width=96).pack(side="left")
+        self.button(row, "保存", self.save_notify, primary=True, width=96).pack(side="right")
+        self.button(row, "关闭", dialog.destroy, width=76).pack(side="right", padx=(0, 8))
+
+    def test_notify(self):
+        try:
+            webhook = notify.validate_webhook(self.webhook_var.get())
+        except ValueError as e:
+            messagebox.showerror("通知设置无效", str(e), parent=self.notify_window or self)
+            return
+        if not webhook:
+            self.notify_status.configure(text="请先填写 Webhook 地址。", text_color="#A47A34")
+            return
+        self.notify_status.configure(text="正在发送测试通知…", text_color=MUTED)
+        threading.Thread(target=self._test_notify, args=(webhook,), daemon=True).start()
+
+    def _test_notify(self, webhook):
+        try:
+            notify.send(webhook, f"✅ Codex 续接助手：飞书通知测试成功\n时间：{time.strftime('%Y-%m-%d %H:%M:%S')}")
+            self.events.put(("notify_result", ("测试通知已发送，请查看飞书群。", "normal")))
+        except Exception as e:
+            self.events.put(("notify_result", (f"测试通知发送失败：{e}", "error")))
+
+    def save_notify(self):
+        try:
+            webhook = notify.validate_webhook(self.webhook_var.get())
+            self.config_data["webhook"] = webhook
+            write_json(CONFIG, self.config_data)
+        except (ValueError, OSError) as e:
+            messagebox.showerror("通知设置无效", str(e), parent=self.notify_window or self)
+            return
+        self.webhook_var.set(webhook)
+        self.monitor.commands.put(("webhook", webhook))
+        self.refresh_notify_hint()
+        self.notify_status.configure(text="已保存。" + ("续接成功或放弃时会推送。" if webhook else "通知已关闭。"),
+                                     text_color=GREEN if webhook else MUTED)
+
     def choose_cli(self):
         name = filedialog.askopenfilename(parent=self, title="选择 Pebrel 的 pebrel.exe", filetypes=[("Pebrel", "pebrel.exe"), ("可执行文件", "*.exe")])
         if name:
@@ -353,15 +453,16 @@ class App(ResumeView):
             vals = tuple(int(v.get()) for v in (self.interval_var, self.wait_min_var, self.wait_max_var, self.limit_var))
             interval, wait_min, wait_max, limit = vals
             if not (3 <= interval <= 120 and 1 <= wait_min <= 300 and 5 <= wait_max <= 600
-                    and wait_min <= wait_max and 1 <= limit <= 20):
-                raise ValueError("检查间隔 3–120 秒；等待区间 1–600 秒且最短不大于最长（最长至少 5 秒）；重试上限 1–20 次")
+                    and wait_min <= wait_max and 1 <= limit <= 100):
+                raise ValueError("检查间隔 3–120 秒；等待区间 1–600 秒且最短不大于最长（最长至少 5 秒）；重试上限 1–100 次")
             msg = self.message_var.get().strip()
             if not msg or len(msg) > 500 or any(ord(c) < 32 or ord(c) == 127 for c in msg):
                 raise ValueError("请输入 1–500 字的单行续接消息")
+            webhook = notify.validate_webhook(self.webhook_var.get())
             self.config_data.update(cli=self.cli, interval=interval, wait_min=wait_min, wait_max=wait_max,
-                                    limit=limit, message=msg)
+                                    limit=limit, message=msg, webhook=webhook)
             write_json(CONFIG, self.config_data)
-            self.monitor.commands.put(("start", (*vals, msg)))
+            self.monitor.commands.put(("start", (*vals, msg, webhook)))
         except (ValueError, OSError) as e:
             messagebox.showerror("设置无效", str(e), parent=self)
 
@@ -433,6 +534,12 @@ class App(ResumeView):
                 self.previewbox.insert("end", value)
                 self.previewbox.see("end")
                 self.previewbox.configure(state="disabled")
+            elif kind == "notify_result":
+                text, tone = value
+                if self.notify_status is not None and self.notify_status.winfo_exists():
+                    self.notify_status.configure(text=text, text_color=GREEN if tone == "normal" else "#B35842")
+                else:
+                    (messagebox.showinfo if tone == "normal" else messagebox.showerror)("飞书通知", text, parent=self)
         self.after(100, self.drain)
 
     def close(self):

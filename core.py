@@ -130,6 +130,7 @@ class RetryPolicy:
     wait_min: int = 5
     wait_max: int = 30
     attempts: int = 0
+    completed: int = 0
     candidate: tuple | None = None
     due: float = 0
     grace: float = 0
@@ -140,6 +141,7 @@ class RetryPolicy:
     dispatch_seq: int = -1
 
     def _recovered(self):
+        self.completed = self.attempts
         self.attempts = 0
         self.sent_key = None
         self.candidate = None
@@ -153,7 +155,7 @@ class RetryPolicy:
             if seq > self.dispatch_seq and ev.kind == "normal":
                 self.awaiting = False
                 self._recovered()
-                return "watch", "已恢复并完成本轮，继续监测"
+                return "resumed", f"已恢复，第 {self.completed} 次续接生效；继续监测"
             if ev.kind == "manual":
                 return "hold", ev.reason
             if ev.kind == "retry":
@@ -166,7 +168,7 @@ class RetryPolicy:
                 return "watch", ev.reason if ev.signal else "已发送，等待 Codex 新的状态变化；不重复发送"
         elif ev.kind == "normal" and self.attempts > 0 and seq > self.dispatch_seq:
             self._recovered()
-            return "watch", "已恢复并完成本轮，继续监测"
+            return "resumed", f"已恢复，第 {self.completed} 次续接生效；继续监测"
         if ev.kind != "retry":
             self.candidate = None
             return ("hold" if ev.kind == "manual" else "watch"), ev.reason
@@ -174,7 +176,7 @@ class RetryPolicy:
         if key == self.sent_key:
             return "watch", "同一次故障已处理，等待新的状态变化"
         if self.attempts >= self.limit:
-            return "hold", f"已达到连续重试上限 {self.limit} 次"
+            return "exhausted", f"已连续续接 {self.limit} 次仍未成功，已停止自动续接"
         if key != self.candidate:
             self.candidate = key
             low, high = sorted((self.wait_min, self.wait_max))

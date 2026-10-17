@@ -54,7 +54,7 @@ class ViewTests(unittest.TestCase):
         self.view.start_button.invoke()
         name, values = self.view.monitor.commands.get_nowait()
         self.assertEqual(name, "start")
-        self.assertEqual(values, (10, 5, 30, 6, "继续"))
+        self.assertEqual(values, (10, 5, 30, 6, "继续", ""))
         self.view.events.put(("enabled", True))
         self.view.drain()
         self.assertEqual(self.view.message_entry.cget("state"), "disabled")
@@ -134,6 +134,51 @@ class ViewTests(unittest.TestCase):
         error.assert_called_once()
         self.assertTrue(self.view.monitor.commands.empty())
         self.assertFalse(app.CONFIG.exists())
+
+    def test_retry_limit_accepts_up_to_100_and_rejects_more(self):
+        self.bind()
+        self.view.limit_var.set("100")
+        self.view.start()
+        name, values = self.view.monitor.commands.get_nowait()
+        self.assertEqual((name, values), ("start", (10, 5, 30, 100, "继续", "")))
+        self.view.limit_var.set("101")
+        with patch.object(app.messagebox, "showerror") as error:
+            self.view.start()
+        error.assert_called_once()
+        self.assertTrue(self.view.monitor.commands.empty())
+
+    def test_notify_settings_reject_non_feishu_and_push_the_webhook(self):
+        self.view.notify_status = self.view.label(self.view, "")
+        self.view.webhook_var.set("https://example.com/hook")
+        with patch.object(app.messagebox, "showerror") as error:
+            self.view.save_notify()
+        error.assert_called_once()
+        self.assertTrue(self.view.monitor.commands.empty())
+        self.assertNotIn("webhook", self.view.config_data)
+
+        webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/token"
+        self.view.webhook_var.set(webhook)
+        self.view.save_notify()
+        self.assertEqual(self.view.monitor.commands.get_nowait(), ("webhook", webhook))
+        self.assertEqual(self.view.config_data["webhook"], webhook)
+
+    def test_notify_dialog_opens_and_reuses_one_window(self):
+        self.view.notify_settings()
+        first = self.view.notify_window
+        self.assertTrue(first.winfo_exists())
+        self.view.notify_settings()
+        self.assertIs(self.view.notify_window, first)
+
+    def test_log_follows_only_when_reader_is_at_the_bottom(self):
+        with patch.object(self.view.logbox, "yview", return_value=(0.2, 0.5)), \
+                patch.object(self.view.logbox, "see") as see:
+            self.view.append_log("历史记录")
+        see.assert_not_called()
+
+        with patch.object(self.view.logbox, "yview", return_value=(0.8, 1.0)), \
+                patch.object(self.view.logbox, "see") as see:
+            self.view.append_log("新记录")
+        see.assert_called_once_with("end")
 
     def test_rate_limit_warning_and_last_check_are_visible_and_can_clear(self):
         self.bind()

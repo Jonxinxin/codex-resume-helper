@@ -58,8 +58,8 @@ class ResumeView(ctk.CTk):
         root = ctk.CTkFrame(self, fg_color="transparent")
         root.grid(row=0, column=0, sticky="nsew", padx=28, pady=(22, 14))
         root.grid_columnconfigure(0, weight=1)
-        root.grid_rowconfigure(2, weight=3, minsize=334)
-        root.grid_rowconfigure(3, weight=2, minsize=160)
+        root.grid_rowconfigure(2, weight=2, minsize=300)
+        root.grid_rowconfigure(3, weight=3, minsize=260)
 
         header = ctk.CTkFrame(root, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", pady=(0, 20))
@@ -145,38 +145,43 @@ class ResumeView(ctk.CTk):
         settings = self.card(body, width=300)
         settings.grid(row=0, column=1, sticky="nsew")
         settings.grid_columnconfigure(0, weight=1)
-        self.label(settings, "续接设置", size=15, bold=True).grid(row=0, column=0, sticky="w", padx=20, pady=(18, 8))
-        self.label(settings, "恢复时发送的消息", size=12, color=MUTED).grid(row=1, column=0, sticky="w", padx=20)
+        self.label(settings, "续接设置", size=15, bold=True).grid(row=0, column=0, sticky="w", padx=20, pady=(10, 4))
+        self.notify_button = ctk.CTkButton(settings, text="飞书通知", width=90, height=28, corner_radius=7,
+                                           font=self.font(11), fg_color="transparent", hover_color=BG,
+                                           text_color=MUTED, command=self.notify_settings)
+        self.notify_button.grid(row=0, column=0, sticky="e", padx=(0, 16), pady=(10, 4))
+        self.label(settings, "恢复时发送的消息", size=12, color=MUTED, height=20).grid(row=1, column=0, sticky="w", padx=20)
         self.message_entry = ctk.CTkEntry(settings, textvariable=self.message_var, height=36,
                                          fg_color="#FAFBFA", border_color=LINE, corner_radius=8,
                                          font=self.font(), text_color=TEXT)
-        self.message_entry.grid(row=2, column=0, sticky="ew", padx=20, pady=(3, 12))
+        self.message_entry.grid(row=2, column=0, sticky="ew", padx=20, pady=(3, 6))
         self.settings_widgets = [self.message_entry]
         self.step_buttons = []
         for i, (text, unit, var, low, high) in enumerate((
                 ("检查间隔", "秒", self.interval_var, 3, 120),
                 ("最短等待", "秒", self.wait_min_var, 1, 300),
                 ("最长等待", "秒", self.wait_max_var, 5, 600),
-                ("重试上限", "次", self.limit_var, 1, 20))):
+                ("重试上限", "次", self.limit_var, 1, 100))):
             line = ctk.CTkFrame(settings, fg_color="transparent")
-            line.grid(row=3 + i, column=0, sticky="ew", padx=20, pady=5)
+            line.grid(row=3 + i, column=0, sticky="ew", padx=20, pady=1)
             self.label(line, text, size=12).pack(side="left")
             self.label(line, unit, size=12, color=MUTED, width=16).pack(side="right", padx=(7, 0))
             stepper = ctk.CTkFrame(line, fg_color="#F5F7F6", corner_radius=7)
             stepper.pack(side="right")
             for symbol, delta in (("−", -1), ("+", 1)):
-                button = ctk.CTkButton(stepper, text=symbol, width=27, height=31, corner_radius=7,
+                button = ctk.CTkButton(stepper, text=symbol, width=27, height=26, corner_radius=7,
                                        fg_color="transparent", hover_color=LINE, text_color=MUTED,
                                        font=self.font(15), command=lambda v=var, d=delta, lo=low, hi=high: self.step(v, d, lo, hi))
                 button.pack(side="left" if delta == -1 else "right")
                 self.step_buttons.append(button)
-            entry = ctk.CTkEntry(stepper, textvariable=var, width=43, height=31, justify="center",
+            entry = ctk.CTkEntry(stepper, textvariable=var, width=43, height=26, justify="center",
                                  border_width=0, fg_color="#F5F7F6", text_color=TEXT, font=self.font(13))
             entry.pack(side="left")
             self.settings_widgets.append(entry)
-        self.label(settings, "每次冷却在最短–最长之间随机取值。\n报错给出等待时间时以它为准。", size=11,
-                   color=MUTED, justify="left", height=38).grid(
-            row=7, column=0, sticky="w", padx=20, pady=(12, 12))
+        # Spread the leftover height across the stepper rows instead of leaving a
+        # blank block under the last one when the card is taller than its content.
+        for row in range(3, 7):
+            settings.grid_rowconfigure(row, weight=1)
 
         activity = self.card(root)
         activity.grid(row=3, column=0, sticky="nsew")
@@ -391,13 +396,23 @@ class ResumeView(ctk.CTk):
             self.logbox.grid(row=0, column=0, sticky="nsew")
 
     def append_log(self, value):
+        # Follow new lines only while the reader is already at the bottom, so
+        # scrolling back through history is not interrupted by new events.
+        at_bottom = self.logbox.yview()[1] >= 0.999
         self.logbox.configure(state="normal")
         if not self.log_started:
             self.logbox.delete("1.0", "end")
             self.log_started = True
-        self.logbox.insert("end", f"{time.strftime('%H:%M:%S')}    ", "time")
-        self.logbox.insert("end", f"{value}\n")
+            prefix = ""
+        else:
+            prefix = "\n"
+        # Never leave a trailing empty line: see("end") would otherwise show that
+        # blank line and push the newest entry up out of the bottom of the view.
+        self.logbox.insert("end", prefix + time.strftime("%H:%M:%S") + "    ", "time")
+        self.logbox.insert("end", value)
         if int(self.logbox.index("end-1c").split(".")[0]) > 600:
             self.logbox.delete("1.0", "100.0")
-        self.logbox.see("end")
+            at_bottom = True
+        if at_bottom:
+            self.logbox.see("end")
         self.logbox.configure(state="disabled")
