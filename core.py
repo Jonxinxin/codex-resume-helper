@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import random
 import re
 from dataclasses import dataclass
 
@@ -126,7 +127,8 @@ def inspect_screen(text: str, state: str, exited: bool = False) -> Evidence:
 @dataclass
 class RetryPolicy:
     limit: int = 6
-    delay: int = 30
+    wait_min: int = 5
+    wait_max: int = 30
     attempts: int = 0
     candidate: tuple | None = None
     due: float = 0
@@ -175,7 +177,8 @@ class RetryPolicy:
             return "hold", f"已达到连续重试上限 {self.limit} 次"
         if key != self.candidate:
             self.candidate = key
-            self.grace = max(ev.retry_after, min(300, self.delay * (2 ** self.attempts)))
+            low, high = sorted((self.wait_min, self.wait_max))
+            self.grace = max(ev.retry_after, float(random.randint(max(1, low), max(1, high))))
             self.due = now + self.grace
         if now < self.due:
             label = "临时限流冷却中" if ev.signal == "rate_limit" else "故障已确认"

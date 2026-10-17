@@ -103,9 +103,9 @@ class ScreenTests(unittest.TestCase):
 class PolicyTests(unittest.TestCase):
     def setUp(self):
         self.ev = inspect_screen(FAULT, "failed")
-        self.p = RetryPolicy(delay=30)
+        self.p = RetryPolicy(wait_min=30, wait_max=30)
 
-    def test_grace_period_and_backoff(self):
+    def test_grace_period_is_the_configured_wait(self):
         self.assertEqual(self.p.observe(self.ev, 2, 100)[0], "countdown")
         self.assertEqual(self.p.observe(self.ev, 2, 129)[0], "countdown")
         self.assertEqual(self.p.observe(self.ev, 2, 130)[0], "send")
@@ -113,7 +113,18 @@ class PolicyTests(unittest.TestCase):
         self.p.acknowledged()
         self.assertEqual(self.p.observe(Evidence("busy", "running"), 3, 140)[0], "watch")
         self.assertEqual(self.p.observe(self.ev, 4, 150)[0], "countdown")
-        self.assertEqual(self.p.due, 210)
+        self.assertEqual(self.p.due, 180)
+
+    def test_wait_is_random_within_configured_range(self):
+        ev = inspect_screen(FAULT, "failed")
+        seen = set()
+        for _ in range(60):
+            policy = RetryPolicy(wait_min=5, wait_max=30)
+            self.assertEqual(policy.observe(ev, 2, 1000)[0], "countdown")
+            self.assertGreaterEqual(policy.grace, 5)
+            self.assertLessEqual(policy.grace, 30)
+            seen.add(policy.grace)
+        self.assertGreater(len(seen), 1)
 
     def test_unknown_delivery_is_never_retried(self):
         self.p.observe(self.ev, 2, 0)
@@ -126,8 +137,8 @@ class PolicyTests(unittest.TestCase):
         self.p.acknowledged()
         # The same fault on screen must never resend without a new cooldown.
         self.assertEqual(self.p.observe(self.ev, 2, 1)[0], "countdown")
-        self.assertEqual(self.p.observe(self.ev, 2, 60)[0], "countdown")
-        self.assertEqual(self.p.observe(self.ev, 2, 61)[0], "send")
+        self.assertEqual(self.p.observe(self.ev, 2, 30)[0], "countdown")
+        self.assertEqual(self.p.observe(self.ev, 2, 31)[0], "send")
 
     def test_no_reset_from_old_idle(self):
         self.p.dispatching(5)
@@ -150,7 +161,7 @@ class PolicyTests(unittest.TestCase):
         self.p.observe(self.ev, 3, 29)
         self.assertEqual(self.p.due, 59)
 
-    def test_rate_limit_uses_configured_first_wait(self):
+    def test_rate_limit_uses_configured_wait(self):
         ev = inspect_screen(RATE_FAULT, "failed")
         self.assertEqual(self.p.observe(ev, 2, 0)[0], "countdown")
         self.assertEqual(self.p.due, 30)
@@ -159,9 +170,9 @@ class PolicyTests(unittest.TestCase):
         self.p.dispatching(2)
         self.p.acknowledged()
         self.p.observe(ev, 3, 70)
-        self.assertEqual(self.p.due, 130)
+        self.assertEqual(self.p.due, 100)
 
-    def test_server_wait_hint_can_exceed_normal_backoff_cap(self):
+    def test_server_wait_hint_overrides_configured_wait(self):
         for hint, seconds in (("Retry-After: 900", 900), ("Please retry after 12 minutes", 720), ("Try again in 80 seconds", 80)):
             with self.subTest(hint=hint):
                 ev = inspect_screen(RATE_FAULT.replace("\n\n›", "\n" + hint + "\n\n›"), "failed")
@@ -215,7 +226,7 @@ class MonitorIntegrationTests(unittest.TestCase):
         m.dispatch_lock = threading.Lock()
         m.enabled = True
         m.binding = Binding(1, 2, "test-session", 100, "C:/repo", "test")
-        m.policy = RetryPolicy(delay=30)
+        m.policy = RetryPolicy(wait_min=30, wait_max=30)
         m.journal = {}
         m.last_note = ""
         m.countdown_key = None

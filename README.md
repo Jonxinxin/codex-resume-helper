@@ -8,7 +8,7 @@
 
 ## 下载与运行
 
-1. 从 [Releases](https://github.com/Jonxinxin/codex-resume-helper/releases) 下载 `CodexResumeHelper-v1.0.1-windows-x64.zip` 并完整解压。程序已包含 Python 运行环境。
+1. 从 [Releases](https://github.com/Jonxinxin/codex-resume-helper/releases) 下载 `CodexResumeHelper-v1.0.2-windows-x64.zip` 并完整解压。程序已包含 Python 运行环境。
 2. 安装并打开 Pebrel。在 Pebrel 的 PowerShell 中进入解压目录，执行一次 `./install-connection.ps1`，登记当前用户的桌面连接。
 3. 保持 Pebrel 和其中的 Codex 正常打开，双击 `Codex续接助手.exe`。
 4. 点击 **刷新**，选择任务并 **绑定任务**；核对会话详情后点击 **开始监测**。
@@ -22,7 +22,7 @@
 - 识别临时网络断开、超时、服务器错误、上游繁忙和临时限流。
 - 等待 Codex 自行重连结束，并尊重终端显示的重试等待时间。
 - 支持任务搜索、会话绑定、只读窗格预览和本地监测日志。
-- 可调整续接消息、检查间隔、首次等待和重试次数。
+- 可调整续接消息、检查间隔、等待区间（最短/最长）和重试次数。
 - 发送前复核会话和进程；持久化重试记录，避免结果不明时重复发送。
 - 启动后需要手动绑定和开始；遇到已有草稿、权限请求、额度耗尽等情况交由用户处理。
 
@@ -48,9 +48,9 @@ python -m venv .venv
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
-.\build.ps1 -Python .\.venv\Scripts\python.exe -Version 1.0.1
+.\build.ps1 -Python .\.venv\Scripts\python.exe -Version 1.0.2
 ```
 
 构建脚本先运行核心逻辑、界面交互、连接登记和路径适配测试，通过后使用已提交的 PyInstaller spec 打包。界面测试需要 Windows 桌面环境，测试使用模拟任务。
 
-输出为 `dist\Codex续接助手.exe`、`release\CodexResumeHelper-v1.0.1-windows-x64.zip` 和 `release\SHA256SUMS.txt`。ZIP 包含程序、连接安装脚本及使用说明。GitHub 自动提供对应版本的源码归档。
+输出为 `dist\Codex续接助手.exe`、`release\CodexResumeHelper-v1.0.2-windows-x64.zip` 和 `release\SHA256SUMS.txt`。ZIP 包含程序、连接安装脚本及使用说明。GitHub 自动提供对应版本的源码归档。

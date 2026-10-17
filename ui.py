@@ -155,7 +155,8 @@ class ResumeView(ctk.CTk):
         self.step_buttons = []
         for i, (text, unit, var, low, high) in enumerate((
                 ("检查间隔", "秒", self.interval_var, 3, 120),
-                ("首次等待", "秒", self.delay_var, 10, 300),
+                ("最短等待", "秒", self.wait_min_var, 1, 300),
+                ("最长等待", "秒", self.wait_max_var, 5, 600),
                 ("重试上限", "次", self.limit_var, 1, 20))):
             line = ctk.CTkFrame(settings, fg_color="transparent")
             line.grid(row=3 + i, column=0, sticky="ew", padx=20, pady=5)
@@ -173,9 +174,9 @@ class ResumeView(ctk.CTk):
                                  border_width=0, fg_color="#F5F7F6", text_color=TEXT, font=self.font(13))
             entry.pack(side="left")
             self.settings_widgets.append(entry)
-        self.label(settings, "故障按“首次等待”递增退避，最长等 5 分钟。\n报错给出等待时间时以它为准。", size=11,
+        self.label(settings, "每次冷却在最短–最长之间随机取值。\n报错给出等待时间时以它为准。", size=11,
                    color=MUTED, justify="left", height=38).grid(
-            row=6, column=0, sticky="w", padx=20, pady=(12, 12))
+            row=7, column=0, sticky="w", padx=20, pady=(12, 12))
 
         activity = self.card(root)
         activity.grid(row=3, column=0, sticky="nsew")

@@ -145,7 +145,7 @@ class Monitor:
             if self.journal_error:
                 raise RuntimeErrorInfo(self.journal_error)
             self.runtime.verify(self.binding, processes=True)
-            self.interval, self.policy.delay, self.policy.limit, self.message = data
+            self.interval, self.policy.wait_min, self.policy.wait_max, self.policy.limit, self.message = data
             if self.policy.uncertain:
                 raise RuntimeErrorInfo("上次发送结果未确认，请先在原窗格检查，再点击重置重试")
             self.stop_requested.clear()
@@ -153,7 +153,7 @@ class Monitor:
             self.next_poll = 0
             self.emit("enabled", True)
             self.emit("health", {"title": "", "tone": "normal"})
-            self.note(f"开始监测，每 {self.interval} 秒检查；最多连续重试 {self.policy.limit} 次")
+            self.note(f"开始监测，每 {self.interval} 秒检查；等待 {self.policy.wait_min}–{self.policy.wait_max} 秒后重试，最多连续 {self.policy.limit} 次")
         elif name == "pause":
             self.pause("监测已暂停")
         elif name == "preview":
@@ -291,7 +291,8 @@ class App(ResumeView):
         self.counter_var = tk.StringVar(value="已重试 0 次")
         self.message_var = tk.StringVar(value=self.config_data.get("message", "继续"))
         self.interval_var = tk.StringVar(value=str(self.config_data.get("interval", 10)))
-        self.delay_var = tk.StringVar(value=str(self.config_data.get("delay", 30)))
+        self.wait_min_var = tk.StringVar(value=str(self.config_data.get("wait_min", 5)))
+        self.wait_max_var = tk.StringVar(value=str(self.config_data.get("wait_max", 30)))
         self.limit_var = tk.StringVar(value=str(self.config_data.get("limit", 6)))
         self.build_ui()
         self.search.trace_add("write", lambda *_: self.render_rows())
@@ -349,13 +350,16 @@ class App(ResumeView):
         if self.enabled or self.binding_pending or not self.bound:
             return
         try:
-            vals = tuple(int(v.get()) for v in (self.interval_var, self.delay_var, self.limit_var))
-            if not (3 <= vals[0] <= 120 and 10 <= vals[1] <= 300 and 1 <= vals[2] <= 20):
-                raise ValueError("检查间隔 3–120 秒，首次等待 10–300 秒，重试上限 1–20 次")
+            vals = tuple(int(v.get()) for v in (self.interval_var, self.wait_min_var, self.wait_max_var, self.limit_var))
+            interval, wait_min, wait_max, limit = vals
+            if not (3 <= interval <= 120 and 1 <= wait_min <= 300 and 5 <= wait_max <= 600
+                    and wait_min <= wait_max and 1 <= limit <= 20):
+                raise ValueError("检查间隔 3–120 秒；等待区间 1–600 秒且最短不大于最长（最长至少 5 秒）；重试上限 1–20 次")
             msg = self.message_var.get().strip()
             if not msg or len(msg) > 500 or any(ord(c) < 32 or ord(c) == 127 for c in msg):
                 raise ValueError("请输入 1–500 字的单行续接消息")
-            self.config_data.update(cli=self.cli, interval=vals[0], delay=vals[1], limit=vals[2], message=msg)
+            self.config_data.update(cli=self.cli, interval=interval, wait_min=wait_min, wait_max=wait_max,
+                                    limit=limit, message=msg)
             write_json(CONFIG, self.config_data)
             self.monitor.commands.put(("start", (*vals, msg)))
         except (ValueError, OSError) as e:

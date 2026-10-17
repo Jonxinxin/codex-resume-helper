@@ -54,7 +54,7 @@ class ViewTests(unittest.TestCase):
         self.view.start_button.invoke()
         name, values = self.view.monitor.commands.get_nowait()
         self.assertEqual(name, "start")
-        self.assertEqual(values, (10, 30, 6, "继续"))
+        self.assertEqual(values, (10, 5, 30, 6, "继续"))
         self.view.events.put(("enabled", True))
         self.view.drain()
         self.assertEqual(self.view.message_entry.cget("state"), "disabled")
@@ -119,6 +119,16 @@ class ViewTests(unittest.TestCase):
     def test_invalid_settings_do_not_start_or_save(self):
         self.bind()
         self.view.interval_var.set("0")
+        with patch.object(app.messagebox, "showerror") as error:
+            self.view.start()
+        error.assert_called_once()
+        self.assertTrue(self.view.monitor.commands.empty())
+        self.assertFalse(app.CONFIG.exists())
+
+    def test_wait_range_must_be_ordered(self):
+        self.bind()
+        self.view.wait_min_var.set("30")
+        self.view.wait_max_var.set("5")
         with patch.object(app.messagebox, "showerror") as error:
             self.view.start()
         error.assert_called_once()
