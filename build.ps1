@@ -6,6 +6,7 @@
 
 $ErrorActionPreference = 'Stop'
 Push-Location $PSScriptRoot
+$stagingDirectory = $null
 try {
     & $Python -c "import sys, struct; assert sys.platform == 'win32' and struct.calcsize('P') == 8, 'Build requires Windows x64 Python'"
     if ($LASTEXITCODE -ne 0) { throw 'Build requires Windows x64 Python.' }
@@ -18,6 +19,8 @@ try {
 
     $releaseDirectory = Join-Path $PSScriptRoot 'release'
     [IO.Directory]::CreateDirectory($releaseDirectory) | Out-Null
+    Get-ChildItem -LiteralPath $releaseDirectory -Directory -Filter '*-stage-*' -ErrorAction SilentlyContinue |
+        Remove-Item -Recurse -Force
     $packageName = "CodexResumeHelper-v$Version-windows-x64"
     $stagingDirectory = Join-Path $releaseDirectory ($packageName + '-stage-' + [Guid]::NewGuid().ToString('N'))
     [IO.Directory]::CreateDirectory($stagingDirectory) | Out-Null
@@ -33,5 +36,8 @@ try {
     Write-Output "Release archive: $archive"
     Write-Output "SHA-256: $hash"
 } finally {
+    if ($stagingDirectory -and (Test-Path -LiteralPath $stagingDirectory)) {
+        Remove-Item -LiteralPath $stagingDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    }
     Pop-Location
 }
